@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MERRY CHRISTMAS, IZZY 🎄</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #03050e; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; cursor: pointer; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// ================= Settings =================
+const TITLE = "MERRY CHRISTMAS";
+const NAME = "IZZY";
+const SUBTITLE = "WISHING YOU LOVE, JOY & PEACE";
+
+const SPIN_SPEED = 0.55;   // tree spin speed
+const PITCH = 0.33;        // camera looks slightly down
+const ASPECT = 2.0;        // a character is 2x taller than wide
+const BG = "#03050e";
+
+const L0 = [-0.45, 0.55, 0.70];
+const Ln = Math.hypot(...L0);
+const LX = L0[0] / Ln, LY = L0[1] / Ln, LZ = L0[2] / Ln;
+
+const GREENS = [[45,170,60],[60,195,80],[35,145,50],[95,210,95],[30,125,45]];
+const ORNAMENT_COLORS = [[235,40,50],[255,200,40],[60,120,255],[255,110,180],[170,90,255],[225,225,240],[255,140,30]];
+const LIGHT_COLORS = [[255,230,140],[255,255,255],[255,180,80],[150,220,255]];
+const GIFT_COLORS = [[140,70,220],[40,160,70],[215,40,45],[45,95,220],[235,70,70],[30,150,160]];
+const RIBBON = [250,210,70];
+const GARLAND = [225,35,45];
+
+const TIERS = [];   // [y_bottom, y_top, r_bottom, r_top]
+[0.62, 0.53, 0.44, 0.36, 0.28, 0.20].forEach((rb, k) => {
+  const yb = k * 0.15;
+  TIERS.push(k === 5 ? [yb, 1.02, rb, 0] : [yb, yb + 0.26, rb, rb * 0.4]);
+});
+const GROUND_Y = -0.10, GROUND_R = 0.92, STAR_Y = 1.11, STAR_R = 0.12;
+const K_PLAIN = 0, K_ORNAMENT = 1, K_LIGHT = 2, K_GARLAND = 3, K_GROUND = 4;
+
+const CHARSET = " *#%&^@$|~=o+.:'";
+
+// ---- Timeline of the intro (seconds) ----
+const TURNS = 7, T_TREE0 = 0.9, T_TREE = 4.2;   // spiral that draws the tree, top -> bottom
+const T_GROUND = 4.9, T_GIFTS = 5.4, T_ORN = 5.8, T_LIGHTS = 6.2, T_SNOW = 5.0, T_TEXT = 6.6;
+const CI = ch => CHARSET.indexOf(ch);
+
+// ================= Helpers =================
+function makeRng(seed) {
+  let a = seed >>> 0;
+  const f = () => {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  f.uniform = (lo, hi) => lo + (hi - lo) * f();
+  f.choice = arr => arr[Math.floor(f() * arr.length)];
+  return f;
+}
+function frange(a, b, step) {
+  const n = Math.max(1, Math.floor((b - a) / step));
+  const out = [];
+  for (let i = 0; i <= n; i++) out.push(a + (b - a) * i / n);
+  return out;
+}
+function outerRadius(y) {
+  let best = 0;
+  for (const [yb, yt, rb, rt] of TIERS) {
+    if (y >= yb && y <= yt) best = Math.max(best, rb + (rt - rb) * (y - yb) / (yt - yb));
+  }
+  return best;
+}
+
+function spiralW(y, a) {
+  const yn = Math.min(1, Math.max(0, (1.02 - y) / 1.12));
+  const u = yn * TURNS;
+  let f = a / (2 * Math.PI); f -= Math.floor(f);
+  let d = f - (u - Math.floor(u)); if (d < 0) d += 1;
+  return u + d;
+}
+const spiralTime = (x, y, z) => T_TREE0 + T_TREE * spiralW(y, Math.atan2(z, x)) / (TURNS + 1);
+
+// ================= Building the 3D scene =================
+function buildScene(scale) {
+  const rnd = makeRng(2026);
+  const P = [], RV = [];
+  const sx = scale * ASPECT;
+  let revealAt = null;           // number, or "spiral"
+  const add = (x, y, z, nx, ny, nz, c, ch, kind, ph) => {
+    P.push(x, y, z, nx, ny, nz, c[0], c[1], c[2], CI(ch), kind, ph);
+    RV.push(revealAt === "spiral" ? spiralTime(x, y, z) : revealAt);
+  };
+
+  function addSphere(cx, cy, cz, rad, col, ch, kind, ph) {
+    const n = Math.max(24, Math.floor(4 * Math.PI * (rad * sx) ** 2 * 1.6));
+    for (let j = 0; j < n; j++) {
+      const ny = 1 - 2 * (j + 0.5) / n;
+      const rr = Math.sqrt(Math.max(0, 1 - ny * ny));
+      const th = j * 2.399963;
+      const nx = rr * Math.cos(th), nz = rr * Math.sin(th);
+      add(cx + nx * rad, cy + ny * rad, cz + nz * rad, nx, ny, nz, col, ch, kind, ph);
+    }
+  }
+
+  function addBox(gx, gz, w, d, h, rot, col) {
+    const cr = Math.cos(rot), sr = Math.sin(rot);
+    const y0 = GROUND_Y, su = 0.5 / sx, sv = 0.5 / scale;
+    const put = (u, v, y, nlu, ny, nlv, ribbon) => {
+      add(gx + u * cr - v * sr, y, gz + u * sr + v * cr,
+          nlu * cr - nlv * sr, ny, nlu * sr + nlv * cr,
+          ribbon ? RIBBON : col, ribbon ? "+" : rnd.choice("#%&"), K_PLAIN, 0);
+    };
+    const rw = w * 0.18, rd = d * 0.18;
+    for (const u of frange(-w, w, su))
+      for (const v of frange(-d, d, su))
+        put(u, v, y0 + h, 0, 1, 0, Math.abs(u) < rw || Math.abs(v) < rd);
+    for (const y of frange(y0, y0 + h, sv)) {
+      for (const v of frange(-d, d, su)) {
+        put(w, v, y, 1, 0, 0, Math.abs(v) < rd);
+        put(-w, v, y, -1, 0, 0, Math.abs(v) < rd);
+      }
+      for (const u of frange(-w, w, su)) {
+        put(u, d, y, 0, 0, 1, Math.abs(u) < rw);
+        put(u, -d, y, 0, 0, -1, Math.abs(u) < rw);
+      }
+    }
+    const bow = Math.min(w, d) * 0.35;
+    for (const off of [-bow * 0.8, bow * 0.8])
+      addSphere(gx + off * cr, y0 + h + bow * 0.6, gz + off * sr, bow * 0.7, RIBBON, "o", K_PLAIN, 0);
+  }
+
+  // tree layers
+  revealAt = "spiral";
+  for (const [yb, yt, rb, rt] of TIERS) {
+    const h = yt - yb, slope = (rb - rt) / h, nl = Math.sqrt(1 + slope * slope);
+    const nY = Math.max(4, Math.floor(h * scale * 2.4));
+    for (let iy = 0; iy <= nY; iy++) {
+      const t = iy / nY, y = yb + h * t, r = rb + (rt - rb) * t;
+      const nA = Math.max(6, Math.floor(2 * Math.PI * r * sx * 1.8));
+      const k = 0.35 + 0.9 * (1 - t) ** 1.5;
+      for (let ia = 0; ia < nA; ia++) {
+        const a = (ia + rnd()) / nA * 2 * Math.PI;
+        const rr = r * (1 + rnd.uniform(-0.07, 0.05));
+        const ca = Math.cos(a), sa = Math.sin(a);
+        const base = rnd.choice(GREENS);
+        add(rr * ca, y + rnd.uniform(-0.01, 0.01), rr * sa, ca / nl, slope / nl, sa / nl,
+            [Math.min(255, base[0] * k), Math.min(255, base[1] * k), Math.min(255, base[2] * k)],
+            rnd.choice("*#%&^@$"), K_PLAIN, 0);
+      }
+    }
+  }
+  // trunk
+  for (const y of frange(GROUND_Y, 0.05, 0.5 / scale)) {
+    const nA = Math.max(8, Math.floor(2 * Math.PI * 0.07 * sx * 1.8));
+    for (let ia = 0; ia < nA; ia++) {
+      const a = ia / nA * 2 * Math.PI, ca = Math.cos(a), sa = Math.sin(a);
+      add(0.07 * ca, y, 0.07 * sa, ca, 0, sa, [120, 75, 38], rnd.choice("|#"), K_PLAIN, 0);
+    }
+  }
+  // red garland
+  const nG = Math.floor(2600 * scale / 30);
+  for (let i = 0; i < nG; i++) {
+    const t = i / nG, y = 0.06 + t * 0.86, a = t * 3.2 * 2 * Math.PI;
+    const r = outerRadius(y) * 1.01 + 0.012, ca = Math.cos(a), sa = Math.sin(a);
+    for (const dy of [0, 0.45 / scale, 0.9 / scale])
+      add(r * ca, y + dy, r * sa, ca, 0.3, sa, GARLAND, rnd.choice("~=o"), K_GARLAND, t * 25), RV[RV.length - 1] += 0.15;
+  }
+  // ornaments
+  for (let i = 0; i < 32; i++) {
+    revealAt = T_ORN + rnd() * 1.4;
+    const y = rnd.uniform(0.04, 0.92), a = rnd.uniform(0, 2 * Math.PI);
+    const r0 = outerRadius(y) * 0.98;
+    addSphere(r0 * Math.cos(a), y, r0 * Math.sin(a), y < 0.55 ? 0.034 : 0.027,
+              rnd.choice(ORNAMENT_COLORS), "@", K_ORNAMENT, rnd.uniform(0, 6.28));
+  }
+  // twinkle lights
+  for (let i = 0; i < 110; i++) {
+    revealAt = T_LIGHTS + rnd() * 1.6;
+    const y = rnd.uniform(0.03, 0.98), a = rnd.uniform(0, 2 * Math.PI);
+    const r = outerRadius(y) + 0.012, ca = Math.cos(a), sa = Math.sin(a);
+    add(r * ca, y, r * sa, ca, 0.3, sa, rnd.choice(LIGHT_COLORS), "*", K_LIGHT, rnd.uniform(0, 6.28));
+  }
+  // snowy ground
+  const stepX = 0.6 / sx, stepZ = 0.55 / (scale * Math.sin(PITCH));
+  for (const z of frange(-GROUND_R, GROUND_R, stepZ)) {
+    for (const x of frange(-GROUND_R, GROUND_R, stepX)) {
+      const jx = x + rnd.uniform(-stepX, stepX) * 0.5;
+      const jz = z + rnd.uniform(-stepZ, stepZ) * 0.5;
+      const d = Math.hypot(jx, jz);
+      if (d > GROUND_R || d < 0.2) continue;
+      const e = d / GROUND_R;
+      const y = GROUND_Y + 0.015 * Math.sin(jx * 9) * Math.cos(jz * 7) - 0.03 * e ** 4;
+      const shadow = 0.6 + 0.4 * Math.min(1, (d - 0.2) / 0.5);
+      const v = (185 + rnd() * 65) * shadow * (1 - 0.3 * e * e);
+      revealAt = T_GROUND + 0.9 * e + rnd() * 0.15;
+      add(jx, y, jz, 0, 1, 0, [v * 0.93, v * 0.97, Math.min(255, v * 1.05)],
+          rnd.choice("**##%%.:"), K_GROUND, 0);
+    }
+  }
+  // gifts
+  for (let i = 0; i < 6; i++) {
+    revealAt = T_GIFTS + i * 0.15;
+    const ang = i * 2 * Math.PI / 6 + rnd.uniform(-0.3, 0.3);
+    const rad = rnd.uniform(0.6, 0.74);
+    addBox(rad * Math.cos(ang), rad * Math.sin(ang),
+           rnd.uniform(0.09, 0.13), rnd.uniform(0.09, 0.13), rnd.uniform(0.12, 0.2),
+           rnd.uniform(0, Math.PI), GIFT_COLORS[i % GIFT_COLORS.length]);
+  }
+  return [new Float32Array(P), new Float32Array(RV)];
+}
+
+// ================= Screen & snow =================
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+let Wpx, Hpx, cellW, cellH, W, H, textArea, titleSize, nameSize, subSize, textBlock, scale, pts, rv, snow, zbuf, chars, cols, cy;
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  Wpx = window.innerWidth; Hpx = window.innerHeight;
+  canvas.width = Wpx * dpr; canvas.height = Hpx * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  cellW = Math.max(4, Math.min(8, Wpx / 150));
+  cellH = cellW * ASPECT;
+  textArea = Math.max(120, Math.min(220, Hpx * 0.25));
+  W = Math.floor(Wpx / cellW);
+  H = Math.floor(Hpx / cellH);
+
+  // text sizes: make "MERRY CHRISTMAS" always fit the screen width
+  ctx.font = `bold 100px Georgia, "Times New Roman", serif`;
+  const w100 = [...TITLE.toUpperCase()].reduce((a, ch) => a + ctx.measureText(ch).width + 8, 0);
+  titleSize = Math.max(16, Math.min(64, textArea * 0.27, (Wpx * 0.9) / (w100 / 100)));
+  nameSize = titleSize * 1.35;
+  ctx.font = `100px Georgia, "Times New Roman", serif`;
+  const s100 = ctx.measureText(SUBTITLE.toUpperCase()).width;
+  subSize = Math.min(titleSize * 0.36, (Wpx * 0.9) / (s100 / 100));
+  textBlock = titleSize * 1.25 + nameSize * 1.15 + subSize * 1.6;
+
+  const sceneRows = Math.floor((Hpx - textBlock) / cellH);
+  scale = Math.max(4, Math.min((sceneRows - 2) / 1.65, W / (2 * 0.8 * ASPECT)));
+  const top = (STAR_Y + STAR_R) * Math.cos(PITCH);      // highest point
+  const totalPx = 1.62 * scale * cellH + textBlock;     // tree + text, centered on screen
+  cy = Math.max(0, (Hpx - totalPx) / 2) / cellH + top * scale + 0.5;
+
+  [pts, rv] = buildScene(scale);
+  zbuf = new Float32Array(W * H);
+  chars = new Uint8Array(W * H);
+  cols = new Uint32Array(W * H);
+  snow = [];
+  const n = Math.max(30, Math.floor(W * H / 30));
+  for (let i = 0; i < n; i++) snow.push(Object.assign(newFlake(false), { y: -Math.random() * H * 1.2 }));
+}
+function newFlake(anywhere) {
+  return {
+    x: Math.random() * W, y: anywhere ? Math.random() * H : -1,
+    v: 2.5 + Math.random() * 4.5, ph: Math.random() * 6.28,
+    ch: CI(".'*+"[Math.floor(Math.random() * 4)]), front: Math.random() < 0.3,
+  };
+}
+window.addEventListener("resize", resize);
+canvas.addEventListener("click", () => {          // tap = more snow
+  for (let i = 0; i < 60; i++) snow.push(Object.assign(newFlake(false), { y: -Math.random() * 10, burst: true }));
+});
+
+const pack = (r, g, b) =>
+  (Math.min(255, Math.max(0, r | 0)) << 16) | (Math.min(255, Math.max(0, g | 0)) << 8) | Math.min(255, Math.max(0, b | 0));
+
+function pointInPoly(px, py, verts) {
+  let inside = false;
+  for (let i = 0, j = verts.length - 1; i < verts.length; j = i++) {
+    const [xi, yi] = verts[i], [xj, yj] = verts[j];
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// ================= Drawing one frame =================
+function compose(t, yaw) {
+  zbuf.fill(-1e9); chars.fill(0); cols.fill(0);
+  const cx = W / 2, sx = scale * ASPECT, sy = scale;
+  const ca = Math.cos(yaw), sa = Math.sin(yaw), cp = Math.cos(PITCH), sp = Math.sin(PITCH);
+
+  for (let p = 0; p < pts.length; p += 12) {
+    const x = pts[p], y = pts[p + 1], z = pts[p + 2];
+    const age = t - rv[p / 12];
+    if (age < 0) continue;                                  // not revealed yet
+    const nx = pts[p + 3], ny = pts[p + 4], nz = pts[p + 5], kind = pts[p + 10];
+    const zr = -x * sa + z * ca, nzr = -nx * sa + nz * ca;
+    if (kind !== K_GROUND && ny * sp + nzr * cp < -0.25) continue;
+    const xr = x * ca + z * sa;
+    const y2 = y * cp - zr * sp;
+    let z2 = y * sp + zr * cp;
+    const c = Math.floor(cx + xr * sx), row = Math.floor(cy - y2 * sy);
+    if (c < 0 || c >= W || row < 0 || row >= H) continue;
+    if (kind === K_ORNAMENT || kind === K_LIGHT || kind === K_GARLAND) z2 += 0.02;
+    const i = row * W + c;
+    if (z2 <= zbuf[i]) continue;
+    zbuf[i] = z2;
+    const lit = (nx * ca + nz * sa) * LX + ny * LY + nzr * LZ;
+    let k = 0.5 + 0.7 * (lit > 0 ? lit : 0);
+    let r = pts[p + 6], g = pts[p + 7], b = pts[p + 8];
+    const ph = pts[p + 11];
+    if (kind === K_ORNAMENT) {
+      const s = Math.sin(t * 2.2 + ph);
+      k *= 0.8 + 0.5 * (s > 0 ? s : 0);
+      if (lit > 0.75) { r = 255; g = 255; b = 255; }
+    } else if (kind === K_LIGHT) {
+      k = Math.sin(t * 4 + ph) > 0.2 ? 1.25 : 0.3;
+    } else if (kind === K_GARLAND) {
+      k *= 0.85 + 0.35 * Math.sin(t * 3 - ph);
+    }
+    if (age < 0.35) {                                       // white flash when it appears
+      const fl = 1 - age / 0.35;
+      r += (255 - r) * fl; g += (255 - g) * fl; b += (230 - b) * fl; k = Math.max(k, 1);
+    }
+    chars[i] = pts[p + 9];
+    cols[i] = pack(r * k, g * k, b * k);
+  }
+
+  // glowing spiral "pen" that draws the tree from top to bottom
+  const wHead = (t - T_TREE0) / T_TREE * (TURNS + 1);
+  if (wHead > 0 && wHead < TURNS + 1) {
+    for (let j = 0; j < 40; j++) {
+      const w = wHead - j * 0.025;
+      if (w < 0) break;
+      const yn = Math.min(1, w / TURNS), y = 1.02 - yn * 1.12;
+      const a = (w - Math.floor(w)) * 2 * Math.PI;
+      const r = Math.max(outerRadius(y), y < 0.02 ? 0.07 : 0) + 0.03;
+      const x = r * Math.cos(a), z = r * Math.sin(a);
+      const zr = -x * sa + z * ca, xr = x * ca + z * sa;
+      const c = Math.floor(cx + xr * sx), row = Math.floor(cy - (y * cp - zr * sp) * sy);
+      const z2 = y * sp + zr * cp + 0.05;
+      if (c < 0 || c >= W || row < 0 || row >= H) continue;
+      const i = row * W + c;
+      if (z2 <= zbuf[i]) continue;
+      zbuf[i] = z2;
+      const k = 1 - j / 40;
+      chars[i] = CI(j < 3 ? "@" : "*");
+      cols[i] = pack(255, 215 + 40 * k, 120 + 135 * k * k);
+    }
+  }
+
+  // star on top (spins with the tree)
+  const fx = Math.max(0.18, Math.abs(Math.cos(yaw)));
+  const sa0 = Math.min(1, Math.max(0, (t - 0.3) / 0.6));
+  const pop = sa0 <= 0 ? 0 : 1 + 0.35 * Math.sin(sa0 * Math.PI) - 0.0;   // grows with a little bounce
+  const scy = cy - STAR_Y * cp * sy, Ro = STAR_R * scale * pop, Ri = Ro * 0.42;
+  const verts = [];
+  for (let k = 0; k < 10; k++) {
+    const a = -Math.PI / 2 + k * Math.PI / 5, rad = k % 2 === 0 ? Ro : Ri;
+    verts.push([Math.cos(a) * rad * fx, Math.sin(a) * rad]);
+  }
+  const pulse = 0.9 + 0.2 * Math.sin(t * 3);
+  if (Ro > 0.3) for (let row = Math.floor(scy - Ro) - 1; row <= Math.floor(scy + Ro) + 1; row++) {
+    if (row < 0 || row >= H) continue;
+    for (let c = Math.floor(cx - Ro * ASPECT) - 1; c <= Math.floor(cx + Ro * ASPECT) + 1; c++) {
+      if (c < 0 || c >= W) continue;
+      const px = (c + 0.5 - cx) / ASPECT, py = row + 0.5 - scy;
+      if (pointInPoly(px, py, verts)) {
+        const dist = Math.hypot(px, py) / Ro, k = pulse * (1.2 - 0.5 * dist);
+        chars[row * W + c] = CI(dist < 0.35 ? "@" : "*");
+        cols[row * W + c] = pack(255 * k, 205 * k, 50 * k);
+      }
+    }
+  }
+  // sparkles around the star
+  const rr = makeRng(Math.floor(t * 6));
+  for (let s = 0; s < (Ro > 0.3 ? 8 : 0); s++) {
+    const a = rr.uniform(0, 2 * Math.PI), d = Ro * rr.uniform(1.2, 2.2);
+    const c = Math.floor(cx + Math.cos(a) * d * ASPECT), row = Math.floor(scy + Math.sin(a) * d);
+    if (c >= 0 && c < W && row >= 0 && row < H && chars[row * W + c] === 0) {
+      chars[row * W + c] = CI(rr.choice(["+", ".", "'"]));
+      cols[row * W + c] = pack(255, 240, 170);
+    }
+  }
+  // snow
+  for (const f of snow) {
+    const c = Math.floor(f.x), row = Math.floor(f.y);
+    if (c >= 0 && c < W && row >= 0 && row < H) {
+      const i = row * W + c;
+      if (f.front || chars[i] === 0) {
+        chars[i] = f.ch;
+        cols[i] = f.front ? pack(235, 240, 255) : pack(150, 160, 190);
+      }
+    }
+  }
+}
+
+const styleCache = new Map();
+function styleOf(col) {
+  let s = styleCache.get(col);
+  if (!s) { s = "#" + col.toString(16).padStart(6, "0"); styleCache.set(col, s); }
+  return s;
+}
+
+function draw(t) {
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, Wpx, Hpx);
+  ctx.font = `bold ${cellH * 0.95}px Menlo, Consolas, "Courier New", monospace`;
+  ctx.textBaseline = "top";
+  let last = -1;
+  for (let row = 0; row < H; row++) {
+    for (let c = 0; c < W; c++) {
+      const i = row * W + c, ch = chars[i];
+      if (!ch) continue;
+      if (cols[i] !== last) { last = cols[i]; ctx.fillStyle = styleOf(last); }
+      ctx.fillText(CHARSET[ch], c * cellW, row * cellH);
+    }
+  }
+
+  // text (all caps)
+  const sceneBottom = (cy + 0.46 * scale) * cellH;
+  const y1 = sceneBottom + titleSize * 0.15;
+  ctx.textBaseline = "top";
+
+  // MERRY CHRISTMAS (typed letter by letter)
+  ctx.font = `bold ${titleSize}px Georgia, "Times New Roman", serif`;
+  const letters = [...TITLE.toUpperCase()];
+  const gap = titleSize * 0.08;
+  const widths = letters.map(ch => ctx.measureText(ch).width + gap);
+  let x = (Wpx - widths.reduce((a, b) => a + b, 0) + gap) / 2;
+  const palette = ["#eb323c", "#ffd246", "#3cbe5a"];
+  const shift = Math.floor(t * 4);
+  letters.forEach((ch, j) => {
+    const at = T_TEXT + j * 0.07;
+    if (t >= at) {
+      const e = Math.min(1, (t - at) / 0.25);
+      const col = palette[(Math.floor(j / 2) + shift) % 3];
+      ctx.globalAlpha = e;
+      ctx.shadowBlur = 18; ctx.shadowColor = col; ctx.fillStyle = col;
+      ctx.fillText(ch, x, y1 + (1 - e) * 12 + Math.sin(t * 2 + j * 0.4) * 3);
+    }
+    x += widths[j];
+  });
+
+  // IZZY
+  const tName = T_TEXT + letters.length * 0.07 + 0.3;
+  if (t >= tName) {
+    const e = Math.min(1, (t - tName) / 0.8);
+    const sc = 0.6 + 0.4 * (1 - (1 - e) ** 3);
+    ctx.globalAlpha = e;
+    ctx.font = `bold ${nameSize * sc}px Georgia, "Times New Roman", serif`;
+    ctx.textAlign = "center";
+    ctx.shadowColor = "#ffd246"; ctx.shadowBlur = 25 + 10 * Math.sin(t * 3);
+    ctx.fillStyle = "#ffe08a";
+    const nm = NAME.toUpperCase().split("").join("\u2009");
+    ctx.fillText(nm, Wpx / 2, y1 + titleSize * 1.2 + nameSize * (1 - sc) / 2);
+  }
+  // subtitle
+  const tSub = tName + 0.9;
+  if (t >= tSub) {
+    ctx.globalAlpha = Math.min(1, (t - tSub) / 0.8);
+    ctx.shadowBlur = 0;
+    ctx.font = `${subSize}px Georgia, "Times New Roman", serif`;
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#bed0f0";
+    ctx.fillText(SUBTITLE.toUpperCase(), Wpx / 2, y1 + titleSize * 1.2 + nameSize * 1.15);
+  }
+  ctx.globalAlpha = 1; ctx.shadowBlur = 0; ctx.textAlign = "left";
+}
+
+// ================= Animation =================
+let t0 = performance.now(), lastT = t0;
+function frame(now) {
+  const dt = Math.min(0.1, (now - lastT) / 1000);
+  lastT = now;
+  const t = (now - t0) / 1000;
+  for (const f of snow) {
+    if (t < T_SNOW && !f.burst) continue;
+    f.y += f.v * dt;
+    f.x += Math.sin(t * 1.3 + f.ph) * 1.2 * dt;
+    if (f.y >= H) Object.assign(f, newFlake(false));
+  }
+  if (snow.length > W * H / 30 + 50) snow = snow.filter(f => !(f.burst && f.y < 0));
+  compose(t, t * SPIN_SPEED);
+  draw(t);
+  requestAnimationFrame(frame);
+}
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
